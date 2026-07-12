@@ -1,0 +1,476 @@
+// ==UserScript==
+// @name         Kour
+// @match        *://kour.io/*
+// @version      1.0.1
+// @author       Str8 (ttps://github.com/Str8-ur)
+// @description  Basic Kour.io exploits/cheat.
+// @run-at       document-start
+// @grant        unsafeWindow
+// ==/UserScript==
+
+const Signatures = {
+    ping:              "f3 07 01 00 00", // Filter
+    pong:              "f3 06 01 01 01", // Filter
+    anotherPing:       "f3 04 e2 03 e3", // Filter
+
+    createGame:        "f3 02 e3 03 ff 07 06", // Create Game / Party (Can be used to change partyId)
+    updateState:       "f3 02 fd 02 f4 03 c8", // Insta-kill
+    damageTaken:       "f3 04 c8 02 f5 15 04", // Invisibility
+
+    connectStarts:     "f3 02 e", // Connect (start)
+    connectEnds:       "f1 1c e8 1c bf 0b 23" // Connect (end)
+}
+
+class Kour {
+    constructor() {
+        console.log('%c[Kour] 构造函数被调用', 'background: #4CAF50; color: white; padding: 2px 5px;');
+
+        // sockets: list of WebSocket
+        this.sockets = [];
+
+        // What features you want enabled
+        this.config = {
+            Invisible: true,
+            InstantKill: false // Don't change, wont give you the kill
+        }
+
+        // Current packet count (not used, just visually)
+        this.packets = 0;
+
+        // 添加键盘监听
+        this.initKeyboardListeners();
+
+        // Hook window.WebSocket
+        unsafeWindow.WebSocket = class extends WebSocket {
+            constructor() {
+                super(...arguments);
+                console.log('%c[Kour] WebSocket被创建', 'background: #2196F3; color: white; padding: 2px 5px;');
+
+                this.addEventListener("open", event => {
+                    console.log('%c[Kour] WebSocket连接已打开', 'background: #4CAF50; color: white; padding: 2px 5px;');
+
+                    // Add to this.sockets list.
+                    kourInstance.sockets.push(this);
+
+                    // Hook send/onmessage
+                    kourInstance.hook(this);
+                });
+
+                this.addEventListener("error", event => {
+                    console.log('%c[Kour] WebSocket错误', 'background: #F44336; color: white; padding: 2px 5px;', event);
+                });
+
+                this.addEventListener("close", event => {
+                    console.log('%c[Kour] WebSocket连接关闭', 'background: #FF9800; color: white; padding: 2px 5px;');
+                });
+            }
+        }
+    }
+
+    /**
+     * 初始化键盘事件监听
+     */
+    initKeyboardListeners() {
+        console.log('%c[Kour] 初始化键盘监听器', 'background: #673AB7; color: white; padding: 2px 5px;');
+
+        const handleKeyPress = (event) => {
+            // 检查是否在游戏页面上
+            if (!window.location.hostname.includes('kour.io')) return;
+
+            // 检查是否在输入框或文本区域中
+            const tagName = document.activeElement.tagName.toLowerCase();
+            if (tagName === 'input' || tagName === 'textarea') return;
+
+            // 处理按键
+            const key = event.key.toLowerCase();
+
+            if (key === 'q') {
+                // I键：开启隐身
+                event.preventDefault();
+                this.config.Invisible = true;
+                console.log('%c[Kour] 隐身已开启', 'background: green; color: white; padding: 2px 5px;');
+
+                // 显示临时提示
+                this.showTempMessage('隐身开启', '#4CAF50');
+
+                // 立即更新水印
+                this.updateWatermark();
+
+            } else if (key === 'z') {
+                // O键：关闭隐身
+                event.preventDefault();
+                this.config.Invisible = false;
+                console.log('%c[Kour] 隐身已关闭', 'background: red; color: white; padding: 2px 5px;');
+
+                // 显示临时提示
+                this.showTempMessage('隐身关闭', '#F44336');
+
+                // 立即更新水印
+                this.updateWatermark();
+            }
+        };
+
+        // 使用捕获阶段确保能收到按键事件
+        document.addEventListener('keydown', handleKeyPress, true);
+
+        console.log('%c[Kour] 键盘监听器已注册: I键=开启隐身, O键=关闭隐身', 'background: #673AB7; color: white; padding: 2px 5px;');
+    }
+
+    /**
+     * 显示临时消息提示
+     */
+    showTempMessage(text, color) {
+        // 移除旧的提示
+        const oldMsg = document.getElementById('kour-temp-msg');
+        if (oldMsg) oldMsg.remove();
+
+        // 创建新提示
+        const msg = document.createElement('div');
+        msg.id = 'kour-temp-msg';
+        msg.textContent = `[Kour] ${text}`;
+        msg.style.cssText = `
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            background: ${color};
+            color: white;
+            padding: 10px 15px;
+            border-radius: 5px;
+            font-family: monospace;
+            font-size: 14px;
+            z-index: 999999;
+            opacity: 1;
+            transition: opacity 0.5s;
+        `;
+
+        document.body.appendChild(msg);
+
+        // 3秒后淡出并移除
+        setTimeout(() => {
+            msg.style.opacity = '0';
+            setTimeout(() => {
+                if (msg.parentNode) msg.remove();
+            }, 500);
+        }, 3000);
+    }
+
+    /**
+     * 更新水印显示
+     */
+    updateWatermark() {
+        // 如果水印画布存在，重新绘制
+        const canvas = document.querySelector('canvas');
+        if (canvas && canvas.getContext) {
+            this.watermark();
+        }
+    }
+
+    /**
+    * Converts an array of hexadecimal strings to a human-readable string.
+    *
+    * @param {string[]} hexArray - An array of strings, where each string represents a hexadecimal number.
+    * @returns {string} - A string where each character is derived from the corresponding hexadecimal value.
+    */
+    hexArrayToString(hexArray) {
+        let str = '';
+
+        for (let i = 0; i < hexArray.length; i++) {
+            let hex = hexArray[i];
+            let decimalValue = parseInt(hex, 16);
+
+            str += String.fromCharCode(decimalValue);
+        }
+
+        return str;
+    }
+
+    /**
+    * Hooks into the WebSocket instance to intercept and log WebSocket messages and sends.
+    *
+    * @param {WebSocket} socket - The WebSocket instance to hook into.
+    */
+    hook(socket) {
+        console.log('%c[Kour] 正在Hook WebSocket', 'background: #FF9800; color: white; padding: 2px 5px;', socket.url);
+
+        const send = socket.send; // Original send function
+        const onmessage = socket.onmessage; // Original onmessage function
+
+        socket.onmessage = (event) => {
+            if (event.data == null) {
+                return onmessage.call(socket, event);
+            }
+
+            this.packets += 1;
+
+            let hexArray = Array.from(new Uint8Array(event.data)).map(byte => byte.toString(16).padStart(2, '0'));
+            let uint8Array = new Uint8Array(event.data);
+            let stringHexArray = hexArray.join(" ");
+
+            if (stringHexArray == "") return onmessage.call(socket, event);
+            if (stringHexArray.startsWith(Signatures.ping)) return onmessage.call(socket, event);
+            if (stringHexArray.startsWith(Signatures.anotherPing)) return onmessage.call(socket, event);
+
+            // If the event is a Damage/Shoot event ignore it.
+            if (stringHexArray.startsWith(Signatures.damageTaken) && this.config.Invisible) {
+                console.log('%c[Kour] 拦截伤害数据包 (隐身生效)', 'background: #4CAF50; color: white; padding: 2px 5px;', stringHexArray);
+                return;
+            }
+
+            console.debug("%c <= ", "background:#FF6A19;color:#000", JSON.stringify({
+                "hex_array": stringHexArray,
+                "array": uint8Array,
+                "base64": btoa(String.fromCharCode.apply(null, new Uint8Array(hexArray.map(hex => parseInt(hex, 16))))),
+                "string": this.hexArrayToString(hexArray)
+            }));
+
+            return onmessage.call(socket, event);
+        };
+
+        socket.send = (data) => {
+            this.packets += 1;
+
+            let hexArray = Array.from(new Uint8Array(data)).map(byte => byte.toString(16).padStart(2, '0'));
+            let uint8Array = new Uint8Array(data);
+            let stringHexArray = hexArray.join(" ");
+
+            if (stringHexArray == "") return send.call(socket, data);
+            if (stringHexArray.startsWith(Signatures.pong)) return send.call(socket, data);
+
+            if (stringHexArray.startsWith(Signatures.createGame)) {
+                let partyId = this.hexArrayToString(hexArray.slice(7, 13));
+                console.debug("%c => ", "background:#7F7;color:#000", "Creating game:", partyId);
+                return send.call(socket, data);
+            } else if (stringHexArray.startsWith(Signatures.updateState)  && this.config.InstantKill) { // Repeat state packets (movement, crouch, jump, shoot, switch weapon), causes the game to send 40 of the same packet. So if we shoot we actually send 40 damage packets instead of 1.
+                console.debug("%c => ", "background:#7F7;color:#000", "State repeated.");
+
+                for (let i = 0; i < 40; i++) {
+                    send.call(socket, data);
+                }
+
+                return send.call(socket, data);
+            } else if (stringHexArray.startsWith(Signatures.connectStarts) && stringHexArray.endsWith(Signatures.connectEnds)) {
+                console.debug("%c => ", "background:#7F7;color:#000", "Connecting to game.", this.hexArrayToString(hexArray));
+                return send.call(socket, data);
+            }
+
+            console.debug("%c => ", "background:#7F7;color:#000", JSON.stringify({
+                "hex_array": stringHexArray,
+                "array": uint8Array,
+                "base64": btoa(String.fromCharCode.apply(null, new Uint8Array(hexArray.map(hex => parseInt(hex, 16))))),
+                "string": this.hexArrayToString(hexArray)
+            }));
+
+            return send.call(socket, data);
+        };
+    }
+
+    /**
+    * Draws the watermark onto the unity-canvas.
+    */
+    watermark() {
+        console.log('%c[Kour] 正在绘制水印', 'background: #9C27B0; color: white; padding: 2px 5px;');
+
+        let unityContainer = document.getElementById("unity-container");
+        if (!unityContainer) {
+            console.log('%c[Kour] 找不到unity-container', 'background: #F44336; color: white; padding: 2px 5px;');
+            return;
+        }
+
+        // 移除旧的水印
+        const oldCanvas = document.querySelector('#kour-watermark');
+        if (oldCanvas) oldCanvas.remove();
+
+        let overlayCanvas = document.createElement("canvas");
+        overlayCanvas.id = "kour-watermark";
+
+        overlayCanvas.width = unityContainer.clientWidth;
+        overlayCanvas.height = unityContainer.clientHeight;
+
+        overlayCanvas.style.position = "absolute";
+        overlayCanvas.style.top = "50%";
+        overlayCanvas.style.left = "50%";
+        overlayCanvas.style.transform = "translate(-50%, -50%)";
+        overlayCanvas.style.pointerEvents = "none";
+        overlayCanvas.style.zIndex = "1000";
+
+        unityContainer.appendChild(overlayCanvas);
+
+        let ctx = overlayCanvas.getContext("2d");
+
+        ctx.font = "15px monospace";
+        ctx.textAlign = "center"
+        ctx.textBaseline = "middle"
+
+        let opacity = 1;
+        let delta = 0.03;
+
+        const animate = () => {
+            let lines = [`kour v1.0.1`];
+
+            if (this.config.Invisible) {
+                lines.push("<c>✓ 隐身开启 (按O关闭)")
+            } else {
+                lines.push("<c>✗ 隐身关闭 (按I开启)")
+            }
+
+            let lineHeight = 20;
+            let startY = overlayCanvas.height / 2 - ((lines.length - 1) * lineHeight) / 2 + 60;
+            let centerX = overlayCanvas.width / 2;
+
+            ctx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
+
+            opacity += delta;
+
+            if (opacity > 1) {
+                opacity = 1;
+                delta = -delta;
+            } else if (opacity < 0) {
+                opacity = 0;
+                delta = -delta;
+            }
+
+            ctx.globalAlpha = opacity;
+
+            lines.forEach((line, index) => {
+                if (line.includes("<c>")) {
+                    line = line.replace("<c>", "");
+                    ctx.fillStyle = "#F8CEFF";
+                } else {
+                    ctx.fillStyle = "white";
+                }
+                ctx.fillText(line, centerX, startY + index * lineHeight);
+            });
+
+            ctx.globalAlpha = 1;
+            requestAnimationFrame(animate);
+        };
+
+        animate();
+    }
+}
+
+class Message {
+    constructor() {
+        console.log('%c[Kour] Message类被创建', 'background: #00BCD4; color: white; padding: 2px 5px;');
+        this.msgArray = [243, 2, 253, 3, 246, 3, 1, 244, 34, 245, 23, 1, 7];
+        this.sockets = kourInstance.sockets;
+    }
+
+    /**
+    * Converts a given string into an array of decimal ASCII codes.
+    *
+    * @param {string} text - The input text to be encoded.
+    * @returns {number[]} An array of decimal ASCII codes representing each character in the input text.
+    */
+    encodeDec(text) {
+        const decArray = [];
+
+        for (let i = 0; i < text.length; i++) {
+            decArray.push(text.charCodeAt(i));
+        }
+
+        return decArray;
+    }
+
+    /**
+    * Sends a message through the last socket in the sockets array.
+    *
+    * @param {string} msg - The message to be sent.
+    */
+    send(msg) {
+        console.log('%c[Kour] 发送消息:', 'background: #009688; color: white; padding: 2px 5px;', msg);
+
+        if (!this.sockets || this.sockets.length === 0) {
+            console.log('%c[Kour] 错误: 没有可用的WebSocket连接', 'background: #F44336; color: white; padding: 2px 5px;');
+            return;
+        }
+
+        let socket = this.sockets[this.sockets.length - 1];
+
+        let msgArray = [...this.msgArray];
+
+        let savedlength = msg.length;
+        let amount = Math.floor(savedlength/128);
+        let strLength = [];
+        if (savedlength > 128) {
+            strLength.push(128 + (savedlength % 128));
+            strLength.push(amount);
+        } else {
+            strLength.push(savedlength);
+        }
+
+        msgArray.push(...strLength);
+        msgArray.push(...this.encodeDec(msg));
+
+        socket.send(new Uint8Array(msgArray));
+    }
+}
+
+// 创建实例
+console.log('%c[Kour] 正在初始化脚本...', 'background: #3F51B5; color: white; padding: 2px 5px;');
+const kourInstance = new Kour();
+const kourMessager = new Message();
+
+// 确保全局可访问
+try {
+    // 尝试多种方式暴露到全局
+    unsafeWindow.kourInstance = kourInstance;
+    unsafeWindow.kourMessager = kourMessager;
+
+    // 在某些情况下，unsafeWindow可能不可用，尝试其他方式
+    if (typeof window !== 'undefined') {
+        window.kourInstance = kourInstance;
+        window.kourMessager = kourMessager;
+    }
+
+    // 尝试挂载到全局对象
+    if (typeof globalThis !== 'undefined') {
+        globalThis.kourInstance = kourInstance;
+        globalThis.kourMessager = kourMessager;
+    }
+
+    console.log('%c[Kour] 脚本初始化完成，实例已挂载到全局', 'background: #4CAF50; color: white; padding: 2px 5px;');
+} catch (e) {
+    console.error('%c[Kour] 挂载到全局失败:', 'background: #F44336; color: white; padding: 2px 5px;', e);
+}
+
+// 添加水印
+window.addEventListener("load", () => {
+    console.log('%c[Kour] 页面加载完成，正在添加水印...', 'background: #FF9800; color: white; padding: 2px 5px;');
+
+    // 延迟执行以确保Unity容器已加载
+    setTimeout(() => {
+        if (kourInstance && typeof kourInstance.watermark === 'function') {
+            kourInstance.watermark();
+        } else {
+            console.log('%c[Kour] 无法创建水印: kourInstance未正确初始化', 'background: #F44336; color: white; padding: 2px 5px;');
+        }
+    }, 2000);
+
+    console.log('%c[Kour] 脚本已加载! 键盘快捷键: I键开启隐身, O键关闭隐身', 'background: #4CAF50; color: white; padding: 5px 10px; font-size: 14px;');
+    console.log('%c[Kour] 控制台命令:', 'background: #673AB7; color: white; padding: 2px 5px;');
+    console.log('  kourInstance.config.Invisible = true/false');
+    console.log('  kourMessager.send("your message")');
+    console.log('  kourInstance.watermark()');
+});
+
+// 添加一个全局函数来检查脚本状态
+function checkKourStatus() {
+    console.log('%c[Kour] 状态检查:', 'background: #2196F3; color: white; padding: 2px 5px;');
+    console.log('1. kourInstance:', typeof kourInstance !== 'undefined' ? '已定义' : '未定义');
+    console.log('2. kourMessager:', typeof kourMessager !== 'undefined' ? '已定义' : '未定义');
+
+    if (typeof kourInstance !== 'undefined') {
+        console.log('3. 当前隐身状态:', kourInstance.config.Invisible);
+        console.log('4. WebSocket连接数:', kourInstance.sockets.length);
+        console.log('5. 已处理数据包:', kourInstance.packets);
+    } else {
+        console.log('%c[Kour] 错误: kourInstance未定义', 'background: #F44336; color: white; padding: 2px 5px;');
+    }
+}
+
+// 将检查函数也暴露到全局
+unsafeWindow.checkKourStatus = checkKourStatus;
+if (typeof window !== 'undefined') window.checkKourStatus = checkKourStatus;
+
+console.log('%c[Kour] 运行 checkKourStatus() 来检查脚本状态', 'background: #2196F3; color: white; padding: 2px 5px;');
